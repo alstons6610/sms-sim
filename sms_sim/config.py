@@ -1,8 +1,8 @@
-"""Configuration, command-line parsing, and seed derivation.
+"""Settings for a run, command-line parsing, and seed splitting.
 
-Config owns the master seed, so it also owns the rule for splitting that seed
-into independent child streams. Every source of randomness in the simulation
-comes from `derive_rng`, which is what makes a run reproducible.
+This module owns the seed, so it also owns the rule for splitting that seed
+into separate random generators. Every random number in the whole program
+traces back to `derive_rng` below.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import argparse
 import random
 from dataclasses import dataclass
 
+# Defaults, kept as named constants so the CLI help text and the Config class
+# can't drift apart.
 DEFAULT_MESSAGES = 1000
 DEFAULT_SENDERS = 10
 DEFAULT_MEAN_WAIT = 0.1
@@ -18,13 +20,18 @@ DEFAULT_MEAN_FAILURE_RATE = 0.1
 DEFAULT_MONITOR_INTERVAL = 1.0
 DEFAULT_QUEUE_SIZE = 1000
 
-# Upper bound for a randomly generated seed when the user does not supply one.
+# Biggest seed we'll invent when the user doesn't give us one. Any large number
+# works; this is just a common choice (the largest 32-bit signed integer).
 MAX_GENERATED_SEED = 2 ** 31 - 1
 
 
 @dataclass(frozen=True)
 class Config:
-    """All tunable parameters for one simulation run."""
+    """Every knob for one simulation run, in one object.
+
+    frozen=True makes it read-only after creation, so nothing can quietly
+    change a setting halfway through a run.
+    """
 
     num_messages: int = DEFAULT_MESSAGES
     num_senders: int = DEFAULT_SENDERS
@@ -35,6 +42,12 @@ class Config:
     seed: int = 0
 
     def __post_init__(self) -> None:
+        """Runs automatically after the dataclass is built. Rejects bad values.
+
+        Catching these here means the rest of the code can assume the numbers
+        make sense. Without the mean_wait check, for example, a value of 0
+        would blow up later with a confusing divide-by-zero inside the sender.
+        """
         if self.num_messages < 0:
             raise ValueError("num_messages must not be negative")
         if self.num_senders < 1:
@@ -50,17 +63,28 @@ class Config:
 
 
 def derive_rng(seed: int, label: str) -> random.Random:
-    """Return an independent generator for one named stream of the run.
+    """Build one independent random generator, named by `label`.
 
-    Each caller gets its own `random.Random` instance, so draws never
-    interleave between concurrent senders. The same (seed, label) pair always
-    produces the same sequence, which is the whole basis of reproducibility.
+    This is the heart of reproducibility. Instead of one shared generator for
+    the whole program, each part gets its own, built from the seed plus a label
+    like "messages" or "sender:3".
+
+    Two things come out of this:
+      - Same seed and same label always produce the same sequence of numbers.
+      - Different labels produce unrelated sequences, so senders running at the
+        same time never interfere with each other's randomness.
+
+    random.Random accepts a string as a seed, so "42:sender:3" works fine.
     """
     return random.Random("{}:{}".format(seed, label))
 
 
 def parse_args(argv=None) -> Config:
-    """Build a Config from command-line arguments, generating a seed if absent."""
+    """Turn command-line arguments into a Config.
+
+    If no seed was given we pick one at random. main.py prints it, so any run
+    can be repeated later with --seed.
+    """
     parser = argparse.ArgumentParser(
         prog="sms-sim",
         description="Simulate sending SMS alerts through a pool of concurrent senders.",
@@ -95,6 +119,8 @@ def parse_args(argv=None) -> Config:
     )
 
     args = parser.parse_args(argv)
+
+    # `is not None` rather than a plain truth check, so --seed 0 still works.
     seed = args.seed if args.seed is not None else random.randrange(MAX_GENERATED_SEED)
 
     return Config(
